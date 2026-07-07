@@ -1,45 +1,65 @@
+from __future__ import annotations
+
 import sys
-from awsglue.transforms import *
+
+from awsglue.context import GlueContext
+from awsglue.dynamicframe import DynamicFrame
+from awsglue.job import Job
+from awsglue.transforms import *  # noqa: F401,F403 - standard AWS Glue import style
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.dynamicframe import DynamicFrame
 
-args = getResolvedOptions(sys.argv, ['JOB_NAME'])
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
 
-# Read raw data from existing Glue catalog table
-raw_dyf = glueContext.create_dynamic_frame.from_catalog(
-    database="cust-churn-s3-db", 
-    table_name="cust_churn_bucket",
-    transformation_ctx="raw_dyf"
+def get_optional_arg(name: str, default: str) -> str:
+    flag = f"--{name}"
+    prefix = f"{flag}="
+
+    for arg in sys.argv:
+        if arg.startswith(prefix):
+            return arg.split("=", 1)[1]
+
+    if flag in sys.argv:
+        flag_index = sys.argv.index(flag)
+        if flag_index + 1 < len(sys.argv):
+            return sys.argv[flag_index + 1]
+
+    return default
+
+
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+source_database = get_optional_arg("SOURCE_DATABASE", "churn_db")
+source_table = get_optional_arg("SOURCE_TABLE", "cust_churn_raw")
+output_path = get_optional_arg(
+    "OUTPUT_PATH", "s3://cust-churn-processed-data/cleaned_data/"
 )
 
-# Convert to Spark DataFrame for column operations
+sc = SparkContext()
+glue_context = GlueContext(sc)
+spark = glue_context.spark_session
+job = Job(glue_context)
+job.init(args["JOB_NAME"], args)
+
+raw_dyf = glue_context.create_dynamic_frame.from_catalog(
+    database=source_database,
+    table_name=source_table,
+    transformation_ctx="raw_dyf",
+)
+
 df = raw_dyf.toDF()
 
-# Drop 'Zip Code' column if exists
-if 'Zip Code' in df.columns:
-    df = df.drop('Zip Code')
+if "Zip Code" in df.columns:
+    df = df.drop("Zip Code")
 
-# Drop duplicates
 df = df.dropDuplicates()
 
-# Convert back to DynamicFrame
-cleaned_dyf = DynamicFrame.fromDF(df, glueContext, "cleaned_dyf")
+cleaned_dyf = DynamicFrame.fromDF(df, glue_context, "cleaned_dyf")
 
-# Write cleaned data back to S3 in CSV format
-glueContext.write_dynamic_frame.from_options(
+glue_context.write_dynamic_frame.from_options(
     frame=cleaned_dyf,
     connection_type="s3",
-    connection_options={"path": "s3://query-s3result-bucket/cleaned_data/"},
-    format="csv",
-    transformation_ctx="write_to_s3"
+    connection_options={"path": output_path},
+    format="parquet",
+    transformation_ctx="write_to_s3",
 )
 
 job.commit()
